@@ -107,6 +107,11 @@ function buildEmail(sub) {
       sub.photos.map((p, i) => `<a href="${APP_URL}${p}">Photo ${i + 1}</a>`).join(' &middot; ')
     : '';
 
+  const sigHtml = sub.data.signature
+    ? `<h3 style="margin:18px 0 6px">Signature</h3>
+       <img src="${APP_URL}${sub.data.signature}" alt="Signature" style="max-width:280px;background:#fff;border:1px solid #e3e3e8;border-radius:8px">`
+    : '';
+
   const html = `
     <div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:600px;color:#1c1c1e">
       <h2 style="margin:0 0 4px">${escHtml(label)}</h2>
@@ -116,6 +121,7 @@ function buildEmail(sub) {
         <tr><td style="padding:4px 12px 4px 0;color:#6e6e73">Date</td><td>${escHtml(sub.date)}</td></tr>
       ${body}
       ${photoHtml}
+      ${sigHtml}
       <p style="margin-top:24px"><a href="${APP_URL}" style="color:#2563eb">Open Venue Checklist</a></p>
     </div>`;
 
@@ -138,7 +144,12 @@ async function sendNotification(sub) {
 }
 
 // Create a submission (checklist or issue report)
-app.post('/api/submissions', upload.array('photos', 8), (req, res) => {
+const submissionUpload = upload.fields([
+  { name: 'photos', maxCount: 8 },
+  { name: 'signature', maxCount: 1 },
+]);
+
+app.post('/api/submissions', submissionUpload, (req, res) => {
   const { kind, name, date, data } = req.body;
   if (!kind || !name || !date || !data) {
     return res.status(400).json({ error: 'Missing required fields' });
@@ -149,7 +160,13 @@ app.post('/api/submissions', upload.array('photos', 8), (req, res) => {
   } catch {
     return res.status(400).json({ error: 'Invalid data payload' });
   }
-  const photos = (req.files || []).map((f) => `/uploads/${f.filename}`);
+  const photos = (req.files?.photos || []).map((f) => `/uploads/${f.filename}`);
+  const sigFile = req.files?.signature?.[0];
+  if (kind !== 'issue') {
+    if (photos.length === 0) return res.status(400).json({ error: 'At least one photo is required' });
+    if (!sigFile) return res.status(400).json({ error: 'Signature is required' });
+  }
+  if (sigFile) parsed.signature = `/uploads/${sigFile.filename}`;
   const id = crypto.randomUUID();
   db.prepare(
     'INSERT INTO submissions (id, kind, name, date, data, photos) VALUES (?, ?, ?, ?, ?, ?)'

@@ -6,18 +6,24 @@ const CHECKLISTS = {
     icon: '\u{1F389}',
     purpose: 'Prepare the venue before guests arrive.',
     tasks: [
+      'All training equipment is taken down',
+      'SOULRNR sign is taken down',
+      'Power racks moved outside',
+      'Weights moved downstairs and set up for training downstairs',
+      'Courtyard washed down with Pine-Sol or Lysol — do NOT mop it',
       'Main room is clean',
-      'Tables are set up correctly',
-      'Chairs are set up correctly',
+      'Get table type, quantity, and chair count from Karen',
+      'Tables and chairs brought up to the main room (renters set them up)',
       'Extra tables and chairs are stored neatly',
       'Floors are clean',
-      'Bathrooms are clean and stocked',
+      'Windows are cleaned',
+      'Bathrooms are clean',
+      'Toilet paper and paper towels stocked',
       'Kitchen is clean and ready',
-      'Trash cans have liners',
+      'Trash cans are empty with fresh liners',
       'Entryway is clean',
+      'Sidewalks in front of the venue blown off',
       'Parking/entry area checked',
-      'Temperature is comfortable',
-      'Lights are set correctly',
       'Any special setup instructions are completed',
       'Final photo uploaded',
       'Venue is ready for guests',
@@ -130,9 +136,9 @@ function showHome() {
 
 /* ---------------- Photo picker (shared) ---------------- */
 
-function photoSectionHTML() {
+function photoSectionHTML(required) {
   return `
-    <label class="field-label">Photos</label>
+    <label class="field-label">Photos${required ? ' (required)' : ''}</label>
     <input type="file" id="photo-input" accept="image/*" multiple hidden>
     <button type="button" class="photo-btn" id="photo-btn">\u{1F4F7} Add Photos</button>
     <div class="photo-previews" id="photo-previews"></div>`;
@@ -168,6 +174,69 @@ function renderPreviews() {
     div.append(img, rm);
     wrap.appendChild(div);
   });
+}
+
+/* ---------------- Signature pad (shared) ---------------- */
+
+let sigDrawn = false;
+
+function signatureSectionHTML() {
+  return `
+    <label class="field-label">Signature (required)</label>
+    <canvas class="sig-canvas" id="sig-canvas"></canvas>
+    <button type="button" class="sig-clear" id="sig-clear">Clear signature</button>`;
+}
+
+function wireSignature() {
+  const canvas = document.getElementById('sig-canvas');
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = rect.width * dpr;
+  canvas.height = rect.height * dpr;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+  const blank = () => {
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, rect.width, rect.height);
+    sigDrawn = false;
+  };
+  blank();
+  ctx.strokeStyle = '#1c1c1e';
+  ctx.lineWidth = 2;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+
+  let drawing = false;
+  const pos = (e) => {
+    const r = canvas.getBoundingClientRect();
+    return [e.clientX - r.left, e.clientY - r.top];
+  };
+  canvas.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    drawing = true;
+    sigDrawn = true;
+    canvas.setPointerCapture(e.pointerId);
+    const [x, y] = pos(e);
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    ctx.lineTo(x + 0.1, y + 0.1);
+    ctx.stroke();
+  });
+  canvas.addEventListener('pointermove', (e) => {
+    if (!drawing) return;
+    const [x, y] = pos(e);
+    ctx.lineTo(x, y);
+    ctx.stroke();
+  });
+  canvas.addEventListener('pointerup', () => { drawing = false; });
+  canvas.addEventListener('pointercancel', () => { drawing = false; });
+  document.getElementById('sig-clear').addEventListener('click', blank);
+}
+
+function signatureBlob() {
+  if (!sigDrawn) return Promise.resolve(null);
+  const canvas = document.getElementById('sig-canvas');
+  return new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
 }
 
 /* ---------------- Checklist form ---------------- */
@@ -207,7 +276,10 @@ function showChecklist(key) {
     <div class="card">
       <label class="field-label" for="f-notes">Notes</label>
       <textarea id="f-notes" placeholder="Anything to flag? Damage, leftovers, supplies running low..."></textarea>
-      ${photoSectionHTML()}
+      ${photoSectionHTML(true)}
+    </div>
+    <div class="card">
+      ${signatureSectionHTML()}
     </div>
     <div class="card">
       <div class="complete-row">
@@ -222,6 +294,7 @@ function showChecklist(key) {
     <div class="error-msg" id="error-msg"></div>`;
 
   wirePhotoSection();
+  wireSignature();
 
   document.getElementById('f-had-helper').addEventListener('change', (e) => {
     document.getElementById('helper-wrap').style.display = e.target.checked ? 'block' : 'none';
@@ -243,6 +316,8 @@ function showChecklist(key) {
     err.textContent = '';
     if (!name) { err.textContent = 'Please enter your name.'; return; }
     if (!date) { err.textContent = 'Please select the date.'; return; }
+    if (selectedFiles.length === 0) { err.textContent = 'Please add at least one photo before submitting.'; return; }
+    if (!sigDrawn) { err.textContent = 'Please sign before submitting.'; return; }
 
     const tasks = c.tasks.map((label, i) => ({ label, done: boxes[i].checked }));
     const hadHelper = document.getElementById('f-had-helper').checked;
@@ -340,6 +415,10 @@ async function submitForm(kind, name, date, data, title) {
     fd.append('date', date);
     fd.append('data', JSON.stringify(data));
     selectedFiles.forEach((f) => fd.append('photos', f));
+    if (document.getElementById('sig-canvas')) {
+      const sig = await signatureBlob();
+      if (sig) fd.append('signature', sig, 'signature.png');
+    }
     const res = await fetch('/api/submissions', { method: 'POST', body: fd });
     if (res.status === 401) { window.location.reload(); return; }
     if (!res.ok) throw new Error('Server error');
@@ -456,7 +535,8 @@ function subCardHTML(s) {
           <span class="mark">${t.done ? '✓' : '✗'}</span><span>${esc(t.label)}</span>
         </div>`).join('')}
       ${s.data.notes ? `<h4>Notes</h4><p class="notes-text">${esc(s.data.notes)}</p>` : ''}
-      ${photosHTML(s.photos)}`;
+      ${photosHTML(s.photos)}
+      ${s.data.signature ? `<h4>Signature</h4><img class="sig-img" src="${esc(s.data.signature)}" alt="Signature">` : ''}`;
   }
 
   return `
