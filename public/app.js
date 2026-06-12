@@ -184,6 +184,17 @@ function showChecklist(key) {
       <input type="text" id="f-name" placeholder="Enter your name" autocomplete="name">
       <label class="field-label" for="f-date">Date</label>
       <input type="date" id="f-date" value="${todayISO()}">
+      <div class="complete-row" style="padding:4px 0 10px">
+        <span>Had a helper?</span>
+        <label class="switch">
+          <input type="checkbox" id="f-had-helper">
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div id="helper-wrap" style="display:none">
+        <label class="field-label" for="f-helper-name">Helper's Name</label>
+        <input type="text" id="f-helper-name" placeholder="Who helped you?">
+      </div>
     </div>
     <div class="card">
       <div class="progress" id="progress"></div>
@@ -212,6 +223,10 @@ function showChecklist(key) {
 
   wirePhotoSection();
 
+  document.getElementById('f-had-helper').addEventListener('change', (e) => {
+    document.getElementById('helper-wrap').style.display = e.target.checked ? 'block' : 'none';
+  });
+
   const boxes = [...app.querySelectorAll('[data-task]')];
   const progress = document.getElementById('progress');
   const updateProgress = () => {
@@ -230,10 +245,13 @@ function showChecklist(key) {
     if (!date) { err.textContent = 'Please select the date.'; return; }
 
     const tasks = c.tasks.map((label, i) => ({ label, done: boxes[i].checked }));
+    const hadHelper = document.getElementById('f-had-helper').checked;
     const payload = {
       tasks,
       notes: document.getElementById('f-notes').value.trim(),
       complete: document.getElementById('f-complete').checked,
+      hadHelper,
+      helperName: hadHelper ? document.getElementById('f-helper-name').value.trim() : '',
     };
     await submitForm(key, name, date, payload, c.title);
   });
@@ -447,7 +465,7 @@ function subCardHTML(s) {
         <span class="kind">${esc(KIND_LABELS[s.kind] || s.kind)}</span>
         <span>${badge}</span>
       </div>
-      <div class="meta">${esc(s.name)} · ${esc(s.date)} · submitted ${esc(submitted)}</div>
+      <div class="meta">${esc(s.name)}${s.data.hadHelper ? ` + helper${s.data.helperName ? ': ' + esc(s.data.helperName) : ''}` : ''} · ${esc(s.date)} · submitted ${esc(submitted)}</div>
       <div class="sub-detail" style="display:none">${detail}</div>
     </div>`;
 }

@@ -9,7 +9,13 @@ const PORT = process.env.PORT || 3000;
 // On Render, DATA_DIR points at the persistent disk so the DB and photos survive deploys
 const DATA_DIR = process.env.DATA_DIR || __dirname;
 const UPLOAD_DIR = path.join(DATA_DIR, 'uploads');
-const APP_PASSWORD = process.env.APP_PASSWORD || '';
+
+// Email notifications (Resend). Without RESEND_API_KEY, submissions still save — emails are skipped.
+const RESEND_API_KEY = process.env.RESEND_API_KEY || '';
+const NOTIFY_EMAIL = process.env.NOTIFY_EMAIL || 'wulff.a.eric@gmail.com';
+const EMAIL_FROM = process.env.EMAIL_FROM || 'Venue Checklist <onboarding@resend.dev>';
+// RENDER_EXTERNAL_URL is set automatically by Render; used for photo links in emails
+const APP_URL = (process.env.RENDER_EXTERNAL_URL || process.env.APP_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
 
 if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
@@ -42,74 +48,94 @@ const upload = multer({
 const app = express();
 app.set('trust proxy', 1);
 app.use(express.json());
-app.use(express.urlencoded({ extended: false }));
-
-// ---- Simple shared-password gate (active only when APP_PASSWORD is set) ----
-const authToken = APP_PASSWORD
-  ? crypto.createHash('sha256').update(`venue-checklist:${APP_PASSWORD}`).digest('hex')
-  : null;
-
-const LOGIN_PAGE = `<!DOCTYPE html>
-<html lang="en"><head>
-<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Venue Checklist — Sign In</title>
-<style>
-  * { box-sizing: border-box; margin: 0; }
-  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-         background: #f4f4f6; color: #1c1c1e; display: flex; align-items: center;
-         justify-content: center; min-height: 100vh; padding: 20px; }
-  .box { background: #fff; border: 1px solid #e3e3e8; border-radius: 14px;
-         padding: 28px 22px; width: 100%; max-width: 380px; text-align: center; }
-  h1 { font-size: 20px; margin-bottom: 6px; }
-  p { color: #6e6e73; font-size: 14px; margin-bottom: 20px; }
-  input { width: 100%; font-size: 16px; padding: 13px; border: 1px solid #e3e3e8;
-          border-radius: 10px; background: #f4f4f6; margin-bottom: 12px; }
-  button { width: 100%; padding: 14px; font-size: 16px; font-weight: 700; color: #fff;
-           background: #2563eb; border: none; border-radius: 12px; cursor: pointer; }
-  .err { color: #dc2626; font-size: 14px; font-weight: 600; margin-bottom: 10px; }
-</style></head><body>
-<form class="box" method="POST" action="/login">
-  <h1>Venue Checklist</h1>
-  <p>Enter the venue password to continue.</p>
-  <!--ERR-->
-  <input type="password" name="password" placeholder="Password" autofocus required>
-  <button type="submit">Sign In</button>
-</form></body></html>`;
-
-function getCookie(req, name) {
-  const header = req.headers.cookie || '';
-  for (const part of header.split(';')) {
-    const [k, ...v] = part.trim().split('=');
-    if (k === name) return v.join('=');
-  }
-  return null;
-}
-
-app.post('/login', (req, res) => {
-  if (!authToken) return res.redirect('/');
-  if ((req.body.password || '') === APP_PASSWORD) {
-    const secure = req.secure ? '; Secure' : '';
-    res.setHeader(
-      'Set-Cookie',
-      `auth=${authToken}; HttpOnly; SameSite=Lax; Path=/; Max-Age=15552000${secure}`
-    );
-    return res.redirect('/');
-  }
-  res.status(401).send(LOGIN_PAGE.replace('<!--ERR-->', '<div class="err">Wrong password — try again.</div>'));
-});
-
-app.use((req, res, next) => {
-  if (!authToken) return next();
-  if (req.path === '/login' || req.path === '/healthz') return next();
-  if (getCookie(req, 'auth') === authToken) return next();
-  if (req.path.startsWith('/api/')) return res.status(401).json({ error: 'Unauthorized' });
-  res.status(401).send(LOGIN_PAGE.replace('<!--ERR-->', ''));
-});
 
 app.get('/healthz', (req, res) => res.send('ok'));
 
 app.use(express.static(path.join(__dirname, 'public')));
 app.use('/uploads', express.static(UPLOAD_DIR));
+
+// ---- Email report (sent to NOTIFY_EMAIL on every submission) ----
+
+const KIND_LABELS = {
+  'event-setup': 'Event Setup',
+  'venue-turnover': 'Venue Turnover',
+  'training-setup': 'Training Club Setup',
+  issue: 'Issue Report',
+};
+
+function escHtml(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function buildEmail(sub) {
+  const label = KIND_LABELS[sub.kind] || sub.kind;
+  const helperLine = sub.data.hadHelper
+    ? `Yes${sub.data.helperName ? ' — ' + escHtml(sub.data.helperName) : ''}`
+    : 'No';
+
+  let subject, body;
+  if (sub.kind === 'issue') {
+    subject = `⚠️ ${sub.data.urgency.toUpperCase()} issue: ${sub.data.issueType} — reported by ${sub.name}`;
+    body = `
+      <tr><td style="padding:4px 12px 4px 0;color:#6e6e73">Issue type</td><td><b>${escHtml(sub.data.issueType)}</b></td></tr>
+      <tr><td style="padding:4px 12px 4px 0;color:#6e6e73">Urgency</td><td><b>${escHtml(sub.data.urgency)}</b></td></tr>
+      <tr><td style="padding:4px 12px 4px 0;color:#6e6e73">Resolved</td><td>${sub.data.resolved ? 'Yes' : 'No'}</td></tr>
+      </table>
+      <h3 style="margin:18px 0 6px">Description</h3>
+      <p style="white-space:pre-wrap;margin:0">${escHtml(sub.data.description)}</p>`;
+  } else {
+    const tasks = sub.data.tasks || [];
+    const missed = tasks.filter((t) => !t.done);
+    const status = sub.data.complete
+      ? missed.length ? `Complete — ${missed.length} task(s) missed` : 'Complete — all tasks done'
+      : 'NOT marked complete';
+    subject = `${missed.length === 0 && sub.data.complete ? '✅' : '🟡'} ${label} — ${sub.name} (${tasks.length - missed.length}/${tasks.length} tasks)`;
+    body = `
+      <tr><td style="padding:4px 12px 4px 0;color:#6e6e73">Status</td><td><b>${status}</b></td></tr>
+      </table>
+      <h3 style="margin:18px 0 6px">Tasks</h3>
+      ${tasks.map((t) => t.done
+        ? `<div style="padding:2px 0;color:#16a34a">&#10003; <span style="color:#1c1c1e">${escHtml(t.label)}</span></div>`
+        : `<div style="padding:2px 0;color:#dc2626;font-weight:bold">&#10007; ${escHtml(t.label)} — MISSED</div>`
+      ).join('')}
+      ${sub.data.notes ? `<h3 style="margin:18px 0 6px">Notes</h3><p style="white-space:pre-wrap;margin:0">${escHtml(sub.data.notes)}</p>` : ''}`;
+  }
+
+  const photoHtml = sub.photos.length
+    ? `<h3 style="margin:18px 0 6px">Photos (${sub.photos.length})</h3>` +
+      sub.photos.map((p, i) => `<a href="${APP_URL}${p}">Photo ${i + 1}</a>`).join(' &middot; ')
+    : '';
+
+  const html = `
+    <div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:600px;color:#1c1c1e">
+      <h2 style="margin:0 0 4px">${escHtml(label)}</h2>
+      <table style="font-size:14px;border-collapse:collapse">
+        <tr><td style="padding:4px 12px 4px 0;color:#6e6e73">Submitted by</td><td><b>${escHtml(sub.name)}</b></td></tr>
+        <tr><td style="padding:4px 12px 4px 0;color:#6e6e73">Helper</td><td>${helperLine}</td></tr>
+        <tr><td style="padding:4px 12px 4px 0;color:#6e6e73">Date</td><td>${escHtml(sub.date)}</td></tr>
+      ${body}
+      ${photoHtml}
+      <p style="margin-top:24px"><a href="${APP_URL}" style="color:#2563eb">Open Venue Checklist</a></p>
+    </div>`;
+
+  return { subject, html };
+}
+
+async function sendNotification(sub) {
+  if (!RESEND_API_KEY) {
+    console.log(`[email] RESEND_API_KEY not set — skipped notification for ${sub.kind} by ${sub.name}`);
+    return;
+  }
+  const { subject, html } = buildEmail(sub);
+  const res = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ from: EMAIL_FROM, to: [NOTIFY_EMAIL], subject, html }),
+  });
+  if (!res.ok) throw new Error(`Resend ${res.status}: ${await res.text()}`);
+  console.log(`[email] sent "${subject}" to ${NOTIFY_EMAIL}`);
+}
 
 // Create a submission (checklist or issue report)
 app.post('/api/submissions', upload.array('photos', 8), (req, res) => {
@@ -129,6 +155,9 @@ app.post('/api/submissions', upload.array('photos', 8), (req, res) => {
     'INSERT INTO submissions (id, kind, name, date, data, photos) VALUES (?, ?, ?, ?, ?, ?)'
   ).run(id, kind, name.trim(), date, JSON.stringify(parsed), JSON.stringify(photos));
   res.json({ ok: true, id });
+  sendNotification({ kind, name: name.trim(), date, data: parsed, photos }).catch((e) =>
+    console.error('[email] failed:', e.message)
+  );
 });
 
 // List submissions, newest first
@@ -158,6 +187,10 @@ app.patch('/api/submissions/:id/resolve', (req, res) => {
   res.json({ ok: true, resolved: data.resolved });
 });
 
-app.listen(PORT, () => {
-  console.log(`Venue Checklist running at http://localhost:${PORT}`);
-});
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`Venue Checklist running at http://localhost:${PORT}`);
+  });
+}
+
+module.exports = { app, buildEmail };
