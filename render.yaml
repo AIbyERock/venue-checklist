@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: venue-checklist
+    runtime: node
+    plan: starter
+    buildCommand: npm install
+    startCommand: node server.js
+    healthCheckPath: /healthz
+    disk:
+      name: venue-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: DATA_DIR
+        value: /var/data
+      - key: APP_PASSWORD
+        sync: false

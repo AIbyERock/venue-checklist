@@ -1,0 +1,13 @@
+{
+  "name": "venue-checklist",
+  "version": "1.0.0",
+  "description": "Mobile-friendly venue operations checklist app",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "multer": "^2.0.1"
+  }
+}
