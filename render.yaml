@@ -17,3 +17,7 @@ services:
         sync: false
       - key: NOTIFY_EMAIL
         value: wulff.a.eric@gmail.com
+      # PIN for the "edit the checklists" screen only. Unset falls back to 324324;
+      # set it to "off" to remove that gate. Working a checklist never asks for a PIN.
+      - key: ADMIN_PIN
+        sync: false
