@@ -79,6 +79,7 @@ function ensureColumn(table, column, decl) {
   }
 }
 ensureColumn('sessions', 'closed_by', "TEXT NOT NULL DEFAULT ''");
+ensureColumn('sessions', 'photos', "TEXT NOT NULL DEFAULT '[]'");
 
 // Seed the default checklists once. After this the DB is the source of truth and
 // the defaults are only used by "Reset to original" in the editor.
@@ -256,6 +257,7 @@ function publicSession(row) {
     participants,
     notes: row.notes,
     notesBy: row.notes_by,
+    photos: JSON.parse(row.photos || '[]'),
     version: row.version,
     closed: !!row.closed,
     closedBy: row.closed_by || '',
@@ -348,6 +350,46 @@ app.post('/api/sessions/:id/toggle', (req, res) => {
   res.json({ ok: true, version: row.version + 1 });
 });
 
+// Photos belong to the RUN, not to one phone, so both workers' pictures end up
+// on the report no matter which of them presses submit.
+const MAX_SESSION_PHOTOS = 16;
+
+app.post('/api/sessions/:id/photos', upload.array('photos', 8), (req, res) => {
+  const row = getSession(req.params.id);
+  if (!row) return res.status(404).json({ error: 'Session not found' });
+  if (row.closed) return res.status(409).json({ error: 'This run was already submitted' });
+
+  const by = String(req.body?.by || '').trim().slice(0, 40);
+  const photos = JSON.parse(row.photos || '[]');
+  for (const f of req.files || []) {
+    if (photos.length >= MAX_SESSION_PHOTOS) break;
+    photos.push({ url: `/uploads/${f.filename}`, by, at: new Date().toISOString() });
+  }
+  db.prepare(
+    `UPDATE sessions SET photos = ?, version = version + 1, updated_at = datetime('now') WHERE id = ?`
+  ).run(JSON.stringify(photos), row.id);
+  res.json({ ok: true, photos });
+});
+
+app.post('/api/sessions/:id/photos/remove', (req, res) => {
+  const row = getSession(req.params.id);
+  if (!row) return res.status(404).json({ error: 'Session not found' });
+  if (row.closed) return res.status(409).json({ error: 'This run was already submitted' });
+
+  const url = String(req.body?.url || '');
+  const by = String(req.body?.by || '').trim();
+  const photos = JSON.parse(row.photos || '[]');
+  const target = photos.find((p) => p.url === url);
+  if (!target) return res.status(404).json({ error: 'No such photo' });
+  // Only the person who took it can pull it, so nobody wipes the other's evidence.
+  if ((target.by || '') !== by) return res.status(403).json({ error: `That photo is ${target.by || 'someone else'}'s` });
+
+  db.prepare(
+    `UPDATE sessions SET photos = ?, version = version + 1, updated_at = datetime('now') WHERE id = ?`
+  ).run(JSON.stringify(photos.filter((p) => p.url !== url)), row.id);
+  res.json({ ok: true });
+});
+
 app.post('/api/sessions/:id/notes', (req, res) => {
   const row = getSession(req.params.id);
   if (!row) return res.status(404).json({ error: 'Session not found' });
@@ -427,9 +469,13 @@ function buildEmail(sub) {
       ${sub.data.notes ? `<h3 style="margin:18px 0 6px">Notes</h3><p style="white-space:pre-wrap;margin:0">${escHtml(sub.data.notes)}</p>` : ''}`;
   }
 
+  const credits = sub.data.photoCredits || {};
   const photoHtml = sub.photos.length
     ? `<h3 style="margin:18px 0 6px">Photos (${sub.photos.length})</h3>` +
-      sub.photos.map((p, i) => `<a href="${APP_URL}${p}">Photo ${i + 1}</a>`).join(' &middot; ')
+      sub.photos.map((p, i) => {
+        const by = credits[p] ? ` <span style="color:#6e6e73">(${escHtml(credits[p])})</span>` : '';
+        return `<a href="${APP_URL}${p}">Photo ${i + 1}</a>${by}`;
+      }).join(' &middot; ')
     : '';
 
   const sigHtml = sub.data.signature
@@ -486,7 +532,20 @@ app.post('/api/submissions', submissionUpload, (req, res) => {
   } catch {
     return res.status(400).json({ error: 'Invalid data payload' });
   }
-  const photos = (req.files?.photos || []).map((f) => `/uploads/${f.filename}`);
+  // Anything already on the shared run counts too — the partner's photos must
+  // reach the report even though they are on the other phone.
+  let photos = (req.files?.photos || []).map((f) => `/uploads/${f.filename}`);
+  let photoCredits = {};
+  if (sessionId) {
+    const s = getSession(String(sessionId));
+    if (s) {
+      const shared = JSON.parse(s.photos || '[]');
+      photos = [...new Set([...shared.map((p) => p.url), ...photos])];
+      photoCredits = Object.fromEntries(shared.filter((p) => p.by).map((p) => [p.url, p.by]));
+    }
+  }
+  if (Object.keys(photoCredits).length) parsed.photoCredits = photoCredits;
+
   const sigFile = req.files?.signature?.[0];
   if (kind !== 'issue') {
     if (photos.length === 0) return res.status(400).json({ error: 'At least one photo is required' });

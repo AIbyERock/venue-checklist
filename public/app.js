@@ -244,9 +244,9 @@ function showHome() {
 
 /* ---------------- Photo picker (shared) ---------------- */
 
-function photoSectionHTML(required) {
+function photoSectionHTML(required, shared) {
   return `
-    <label class="field-label">Photos${required ? ' (required)' : ''}</label>
+    <label class="field-label">Photos${required ? ' (required)' : ''}${shared ? ' <span class="shared-tag">shared</span>' : ''}</label>
     <input type="file" id="photo-input" accept="image/*" multiple hidden>
     <button type="button" class="photo-btn" id="photo-btn">\u{1F4F7} Add Photos</button>
     <div class="photo-previews" id="photo-previews"></div>`;
@@ -263,15 +263,69 @@ function wirePhotoSection() {
     }
     input.value = '';
     renderPreviews();
+    uploadPendingPhotos();
   });
+}
+
+// On a checklist, photos go straight onto the shared run so the partner's
+// pictures reach the report no matter who submits. If that upload fails the
+// file simply stays staged here and rides along with the submission instead —
+// this can only ever add photos, never lose them.
+async function uploadPendingPhotos() {
+  if (!run || !run.sessionId || !selectedFiles.length || run.photoUploading) return;
+  run.photoUploading = true;
+  const batch = selectedFiles.slice(0, 8);
+  try {
+    const fd = new FormData();
+    batch.forEach((f) => fd.append('photos', f));
+    fd.append('by', run.me);
+    const res = await fetch(`/api/sessions/${run.sessionId}/photos`, { method: 'POST', body: fd });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const { photos } = await res.json();
+    selectedFiles = selectedFiles.filter((f) => !batch.includes(f));
+    run.photos = photos;
+    renderPreviews();
+    setOffline(false);
+  } catch {
+    setOffline(true);
+  } finally {
+    run.photoUploading = false;
+  }
 }
 
 function renderPreviews() {
   const wrap = document.getElementById('photo-previews');
+  if (!wrap) return;
   wrap.innerHTML = '';
+
+  // Photos already on the shared run — everyone's, tagged with who took them.
+  if (run && run.photos) {
+    for (const p of run.photos) {
+      const div = document.createElement('div');
+      div.className = 'thumb';
+      const img = document.createElement('img');
+      img.src = p.url;
+      div.appendChild(img);
+      if (p.by && p.by !== run.me) {
+        const tag = document.createElement('span');
+        tag.className = 'thumb-by';
+        tag.textContent = p.by;
+        div.appendChild(tag);
+      } else {
+        const rm = document.createElement('button');
+        rm.className = 'remove';
+        rm.textContent = '×';
+        rm.addEventListener('click', () => removeSharedPhoto(p.url));
+        div.appendChild(rm);
+      }
+      wrap.appendChild(div);
+    }
+  }
+
+  // Anything still waiting to go up (or the issue form, which never shares).
   selectedFiles.forEach((f, i) => {
     const div = document.createElement('div');
-    div.className = 'thumb';
+    div.className = 'thumb' + (run ? ' pending' : '');
     const img = document.createElement('img');
     img.src = URL.createObjectURL(f);
     img.onload = () => URL.revokeObjectURL(img.src);
@@ -282,7 +336,23 @@ function renderPreviews() {
     div.append(img, rm);
     wrap.appendChild(div);
   });
+
   if (readyHook) readyHook();
+}
+
+async function removeSharedPhoto(url) {
+  try {
+    const res = await fetch(`/api/sessions/${run.sessionId}/photos/remove`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, by: run.me }),
+    });
+    if (!res.ok) { toast((await res.json()).error || 'Could not remove that photo'); return; }
+    run.photos = run.photos.filter((p) => p.url !== url);
+    renderPreviews();
+  } catch {
+    toast('Could not remove that photo — no signal');
+  }
 }
 
 /* ---------------- Signature pad (shared) ---------------- */
@@ -387,6 +457,8 @@ function showChecklist(key) {
     version: -1,
     state: {},            // taskIndex -> { label, by, at }
     pending: new Map(),    // taskIndex -> desired done, not yet confirmed by the server
+    photos: [],            // { url, by, at } shared across both phones
+    photoUploading: false,
     participants: [],
     celebrated: false,
     doneSections: new Set(),
@@ -455,7 +527,7 @@ function renderChecklist() {
     <div class="card">
       <label class="field-label" for="f-notes">Notes <span class="shared-tag">shared</span></label>
       <textarea id="f-notes" placeholder="Anything to flag? Damage, leftovers, supplies running low..."></textarea>
-      ${photoSectionHTML(true)}
+      ${photoSectionHTML(true, true)}
     </div>
 
     <div class="card">
@@ -606,6 +678,18 @@ function absorb(session, opts = {}) {
     notes.value = session.notes || '';
   }
 
+  // Photos the partner took, appearing on this phone.
+  const incomingPhotos = session.photos || [];
+  const knownPhotos = new Set(run.photos.map((p) => p.url));
+  const freshPhotos = incomingPhotos.filter((p) => !knownPhotos.has(p.url) && p.by && p.by !== run.me);
+  if (incomingPhotos.length !== run.photos.length || freshPhotos.length) {
+    run.photos = incomingPhotos;
+    renderPreviews();
+    if (!opts.silent && freshPhotos.length) {
+      toast(`${freshPhotos[0].by} added ${freshPhotos.length} photo${freshPhotos.length === 1 ? '' : 's'}`);
+    }
+  }
+
   const newlyByOthers = [];
   if (!opts.silent) {
     for (const idx of Object.keys(incoming)) {
@@ -681,8 +765,9 @@ async function pushToggle(index, done) {
 
 // Resend anything the server never acknowledged (dead spot in the building).
 function flushPending() {
-  if (!run.pending.size || run.offline) return;
+  if (run.offline) return;
   for (const [index, done] of [...run.pending]) pushToggle(index, done);
+  uploadPendingPhotos();
 }
 
 function wireNotesSync() {
@@ -818,9 +903,10 @@ function updateReady() {
   if (!line || !btn) return;
 
   const nameEl = document.getElementById('f-name');
+  const sharedPhotos = run && run.photos ? run.photos.length : 0;
   const missing = [];
   if (!nameEl || !nameEl.value.trim()) missing.push('your name');
-  if (selectedFiles.length === 0) missing.push('a photo');
+  if (selectedFiles.length + sharedPhotos === 0) missing.push('a photo');
   if (!sigDrawn) missing.push('your signature');
 
   if (missing.length) {
@@ -850,7 +936,7 @@ async function submitChecklist() {
   err.textContent = '';
   if (!name) { err.textContent = 'Please enter your name.'; return; }
   if (!date) { err.textContent = 'Please select the date.'; return; }
-  if (selectedFiles.length === 0) { err.textContent = 'Please add at least one photo before submitting.'; return; }
+  if (selectedFiles.length + run.photos.length === 0) { err.textContent = 'Please add at least one photo before submitting.'; return; }
   if (!sigDrawn) { err.textContent = 'Please sign before submitting.'; return; }
 
   // Submitting ends the run for everyone, so don't let one person wipe the
