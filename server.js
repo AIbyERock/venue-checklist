@@ -69,6 +69,17 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS sessions_kind_open ON sessions (kind, closed, updated_at);
 `);
 
+// Adds a column to an existing table without disturbing the data already in it.
+// CREATE TABLE IF NOT EXISTS is a no-op once the table exists, so new columns
+// have to come through here.
+function ensureColumn(table, column, decl) {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all();
+  if (!cols.some((c) => c.name === column)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${decl}`);
+  }
+}
+ensureColumn('sessions', 'closed_by', "TEXT NOT NULL DEFAULT ''");
+
 // Seed the default checklists once. After this the DB is the source of truth and
 // the defaults are only used by "Reset to original" in the editor.
 {
@@ -247,6 +258,7 @@ function publicSession(row) {
     notesBy: row.notes_by,
     version: row.version,
     closed: !!row.closed,
+    closedBy: row.closed_by || '',
     startedAt: row.created_at,
   };
 }
@@ -486,9 +498,11 @@ app.post('/api/submissions', submissionUpload, (req, res) => {
     'INSERT INTO submissions (id, kind, name, date, data, photos) VALUES (?, ?, ?, ?, ?, ?)'
   ).run(id, kind, name.trim(), date, JSON.stringify(parsed), JSON.stringify(photos));
 
-  // Close the shared run so the next person starts a clean list.
+  // Close the shared run so the next person starts a clean list. Recording who
+  // did it lets the other phone say whose submit cleared their screen.
   if (sessionId) {
-    db.prepare('UPDATE sessions SET closed = 1 WHERE id = ?').run(String(sessionId));
+    db.prepare('UPDATE sessions SET closed = 1, closed_by = ? WHERE id = ?')
+      .run(name.trim(), String(sessionId));
   }
 
   res.json({ ok: true, id });

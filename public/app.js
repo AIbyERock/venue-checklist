@@ -565,9 +565,12 @@ async function tick() {
     const session = await res.json();
     setOffline(false);
     if (session.closed) {
-      // Someone submitted the run out from under us — pick up a clean one.
+      // Someone submitted the run out from under us — say who, then pick up a clean one.
       stopPolling();
-      toast('That run was submitted. Starting a fresh list.');
+      toast(session.closedBy
+        ? `${session.closedBy} submitted this list. Starting a fresh one.`
+        : 'That run was submitted. Starting a fresh list.');
+      buzz([20, 60, 20]);
       await joinSession({ fresh: false });
       return;
     }
@@ -849,6 +852,15 @@ async function submitChecklist() {
   if (!date) { err.textContent = 'Please select the date.'; return; }
   if (selectedFiles.length === 0) { err.textContent = 'Please add at least one photo before submitting.'; return; }
   if (!sigDrawn) { err.textContent = 'Please sign before submitting.'; return; }
+
+  // Submitting ends the run for everyone, so don't let one person wipe the
+  // other's screen without knowing it.
+  const stillHere = run.participants.filter((p) => p.here && p.name !== run.me).map((p) => p.name);
+  if (stillHere.length) {
+    const who = stillHere.join(' and ');
+    const verb = stillHere.length === 1 ? 'is' : 'are';
+    if (!confirm(`${who} ${verb} still on this list. Submitting finishes it for both of you and clears their screen. Submit anyway?`)) return;
+  }
 
   const doneIdx = new Set(Object.keys(run.state).map(Number));
   const tasks = run.tasks.map((t, i) => ({
